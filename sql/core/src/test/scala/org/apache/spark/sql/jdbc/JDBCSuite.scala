@@ -452,8 +452,18 @@ class JDBCSuite extends SparkFunSuite with BeforeAndAfter with SharedSQLContext 
 
   test("DB2Dialect type mapping") {
     val db2Dialect = JdbcDialects.get("jdbc:db2://127.0.0.1/db")
-    assert(db2Dialect.getJDBCType(StringType).map(_.databaseTypeDefinition).get == "CLOB")
+    assert(db2Dialect.getJDBCType(StringType).map(_.databaseTypeDefinition).get == "VARCHAR(255)")
     assert(db2Dialect.getJDBCType(BooleanType).map(_.databaseTypeDefinition).get == "CHAR(1)")
+    assert(db2Dialect.getJDBCType(ShortType).map(_.databaseTypeDefinition).get == "SMALLINT")
+    assert(db2Dialect.getJDBCType(ByteType).map(_.databaseTypeDefinition).get == "SMALLINT")
+    assert(db2Dialect.getJDBCType(DecimalType(38, 18)).map(_.databaseTypeDefinition).get ==
+      "DECIMAL(31,2)")
+    assert(db2Dialect.getJDBCType(DecimalType(30, 15)).map(_.databaseTypeDefinition) == None)
+
+    assert(db2Dialect.getCatalystType(java.sql.Types.REAL, "REAL", 1, null) === Some(FloatType))
+    assert(db2Dialect.getCatalystType(java.sql.Types.OTHER, "DECFLOAT", 1, null) ===
+      Some(DecimalType(38, 18)))
+    assert(db2Dialect.getCatalystType(java.sql.Types.OTHER, "XML", 1, null) === Some(StringType))
   }
 
   test("PostgresDialect type mapping") {

@@ -261,7 +261,8 @@ case object DB2Dialect extends JdbcDialect {
 
   override def canHandle(url: String): Boolean = url.startsWith("jdbc:db2")
 
-  override def getCatalystType(sqlType: Int, typeName: String, size: Int, md: MetadataBuilder): Option[DataType] = {
+  override def getCatalystType(
+      sqlType: Int, typeName: String, size: Int, md: MetadataBuilder): Option[DataType] = {
     if (sqlType == Types.REAL) {
       Some(FloatType)
     } else if (sqlType == Types.OTHER && typeName.equals("DECFLOAT")) {
@@ -273,10 +274,13 @@ case object DB2Dialect extends JdbcDialect {
   }
 
   override def getJDBCType(dt: DataType): Option[JdbcType] = dt match {
+    // Mapping to CLOB looks logical choice to save strings of all sizes, but it
+    // will fail when writing to DB2 database that not configured to
+    // store CLOB. VARCHAR(255) is sure to work DB2 default configurations.
     case StringType => Some(JdbcType("VARCHAR(255)", java.sql.Types.VARCHAR))
     case BooleanType => Some(JdbcType("CHAR(1)", java.sql.Types.CHAR))
     case ShortType | ByteType => Some(JdbcType("SMALLINT", java.sql.Types.SMALLINT))
-    //DB2 maximum precision is 31. If the precision is greater than 31, map to DB2 max.
+    //DB2 maximum precision is 31. If the precision is greater than 31 map to DB2 max.
     case (t: DecimalType) if (t.precision > 31) =>
       Some(JdbcType("DECIMAL(31,2)", java.sql.Types.DECIMAL))
     case _ => None
