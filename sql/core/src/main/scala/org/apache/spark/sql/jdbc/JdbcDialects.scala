@@ -261,9 +261,24 @@ case object DB2Dialect extends JdbcDialect {
 
   override def canHandle(url: String): Boolean = url.startsWith("jdbc:db2")
 
+  override def getCatalystType(sqlType: Int, typeName: String, size: Int, md: MetadataBuilder): Option[DataType] = {
+    if (sqlType == Types.REAL) {
+      Some(FloatType)
+    } else if (sqlType == Types.OTHER && typeName.equals("DECFLOAT")) {
+      Some(DecimalType(38, 18))
+    } else if (sqlType == Types.OTHER && typeName.equals("XML")) {
+      Some(StringType)
+    } else None
+
+  }
+
   override def getJDBCType(dt: DataType): Option[JdbcType] = dt match {
-    case StringType => Some(JdbcType("CLOB", java.sql.Types.CLOB))
+    case StringType => Some(JdbcType("VARCHAR(255)", java.sql.Types.VARCHAR))
     case BooleanType => Some(JdbcType("CHAR(1)", java.sql.Types.CHAR))
+    case ShortType | ByteType => Some(JdbcType("SMALLINT", java.sql.Types.SMALLINT))
+    //DB2 maximum precision is 31. If the precision is greater than 31, map to DB2 max.
+    case (t: DecimalType) if (t.precision > 31) =>
+      Some(JdbcType("DECIMAL(31,2)", java.sql.Types.DECIMAL))
     case _ => None
   }
 }
