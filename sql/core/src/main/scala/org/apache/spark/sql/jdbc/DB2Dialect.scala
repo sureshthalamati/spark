@@ -30,4 +30,16 @@ private object DB2Dialect extends JdbcDialect {
   }
 
   override def isCascadingTruncateTable(): Option[Boolean] = Some(false)
+
+  override def compileFunction(name: String, input: Seq[String]): Option[String] = name match {
+    case "translate" if (input.size > 1) =>
+      if (input.size == 3) {
+        Option(s"translate(${input(0)} , ${input(2)}, ${input(1)})")
+      } else if (input.size == 4) {
+        Option(s"translate(${input(0)} , ${input(2)}, ${input(1)}, ${input(3)})")
+      } else {
+        None
+      }
+    case _ => None
+  }
 }

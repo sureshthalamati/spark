@@ -130,6 +130,37 @@ abstract class JdbcDialect extends Serializable {
    * None: The behavior of TRUNCATE TABLE is unknown (default).
    */
   def isCascadingTruncateTable(): Option[Boolean] = None
+
+  /**
+    * Compile the filter into dialect specific expression. Most cases
+    * user may not have to overwrite these , if the database
+    * has a specific syntax for a function. They could overwrtite it.
+    *
+    * Note :  Should avoid this being recursive. We can not if we want to support
+    * functions within functions.
+    *
+    * For example DB2 function has translate function that takes arguments in reverse.
+    *
+    * How to do this for a particular function.
+    */
+  // def compileFilter(filter: Filter): Option[String] = None
+
+  // Make it call only after all inputs are compiled.
+  def compileFunction(name: String, input: Seq[String]): Option[String] = None
+
+  //
+  // Where should we put all the standard functions, how to
+  // account for things that may not have be supported in a older version
+  // of a databases. or am I being paranoid.
+  //
+  // Make default implementaion cover all the functions
+
+  def supportsFunction(name: String): Boolean = {
+    val notSupported = Seq("elt", "substring_index")
+    // default all sql standard functions.
+    !notSupported.contains(name)
+  }
+
 }
 
 /**

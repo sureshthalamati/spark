@@ -448,6 +448,17 @@ object DataSourceStrategy extends Strategy with Logging {
    */
   protected[sql] def translateFilter(predicate: Expression): Option[Filter] = {
     predicate match {
+      /* case expressions.EqualTo(a: Expression, Literal(v, t)) =>
+        Some(sources.EqualToForFunctions(
+          sources.MyFunction(a.prettyName,
+            a.references.toSeq.map(a => a.name)), convertToScala(v, t)))
+      */
+      case expressions.EqualTo(left, right) =>
+        for {
+          leftFilter <- translateFilter(left)
+          rightFilter <- translateFilter(right)
+        } yield sources.EqualToFilter(leftFilter, rightFilter)
+
       case expressions.EqualTo(a: Attribute, Literal(v, t)) =>
         Some(sources.EqualTo(a.name, convertToScala(v, t)))
       case expressions.EqualTo(Literal(v, t), a: Attribute) =>
@@ -516,8 +527,99 @@ object DataSourceStrategy extends Strategy with Logging {
       case expressions.Contains(a: Attribute, Literal(v: UTF8String, StringType)) =>
         Some(sources.StringContains(a.name, v.toString))
 
+      case expressions.Abs(a: Attribute) => Some(sources.Abs(a.name))
+      case expressions.Year(a: Attribute) => Some(sources.Year(a.name))
+      case expressions.Literal(v, t) => Some(sources.LiteralFilter(convertToScala(v, t)))
+      case expressions.Concat(a: Seq[Expression]) =>
+        val args = a.map(a => a match {
+          case a: Attribute => Option(AttributeFilter(a.name))
+          case _ => translateFilter(a)
+        })
+
+        if (!args.exists(!_.isDefined)) {
+          val inputArgs = args.map(_.get)
+          Some(sources.VarArgFunction("concat", inputArgs))
+        } else {
+          None
+        }
+
+      case expr : Expression if (!expr.isInstanceOf[NonSQLExpression]) =>
+
+        val funcName = if (expr.isInstanceOf[BinaryArithmetic]) {
+              expr.asInstanceOf[BinaryArithmetic].symbol } else { expr.prettyName }
+        if (FunctionRegistry.functionSet.contains(funcName)) {
+          expr match {
+            case expr: UnaryExpression =>
+              val args = expr.child match {
+                case a: Attribute => Option(AttributeFilter(a.name))
+                case _ => translateFilter(expr.child)
+              }
+              if (args.isDefined) {
+                val inputArg = args.get
+                Some(sources.UnaryFunction(expr.prettyName, inputArg))
+              } else {
+                None
+              }
+
+            case expr: BinaryOperator =>
+              val args = expr.children.map(child => child match {
+                case a: Attribute => Option(AttributeFilter(a.name))
+                case _ => translateFilter(child)
+              })
+              if (!args.exists(!_.isDefined)) {
+                Some(sources.BinaryOperatorFunction(funcName, args(0).get, args(1).get))
+              } else {
+                None
+              }
+
+            case expr: BinaryExpression =>
+              val args = expr.children.map(child => child match {
+                case a: Attribute => Option(AttributeFilter(a.name))
+                case _ => translateFilter(child)
+              })
+              if (!args.exists(!_.isDefined)) {
+                Some(sources.BinaryFunction(funcName, args(0).get, args(1).get))
+              } else {
+                None
+              }
+
+
+
+            case expr: TernaryExpression =>
+              val args = expr.children.map(child => child match {
+                case a: Attribute => Option(AttributeFilter(a.name))
+                case _ => translateFilter(child)
+              })
+              if (!args.exists(!_.isDefined)) {
+                Some(sources.TernaryFunction(expr.prettyName,
+                  args(0).get, args(1).get, args(2).get))
+              } else {
+                None
+              }
+
+            case expr =>
+              expr.children match {
+                case children: Seq[Expression] =>
+                  val args = children.map(a => a match {
+                    case a: Attribute => Option(AttributeFilter(a.name))
+                    case _ => translateFilter(a)
+                  })
+                  if (!args.exists(!_.isDefined)) {
+                    val inputArgs = args.map(_.get)
+                    Some(sources.VarArgFunction(expr.prettyName, inputArgs))
+                  } else {
+                    None
+                  }
+                case _ => None
+              }
+            case _ => None
+          }
+        } else {
+          None
+        }
       case _ => None
     }
+
   }
 
   /**

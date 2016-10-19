@@ -143,6 +143,71 @@ object JDBCRDD extends Logging {
         } else {
           null
         }
+      case EqualToFilter(f1, f2) =>
+        val left = compileFilter(f1, dialect)
+        val right = compileFilter(f2, dialect)
+        if (left.isDefined && right.isDefined) {
+          s"${left.get} = ${right.get}"
+        } else {
+          null
+        }
+      case Abs(attr) => s"abs($attr)"
+      case LiteralFilter(value) => s"${compileValue(value)}"
+      case Year(attr) => s"year($attr)"
+      case AttributeFilter(attr) => attr
+      case UnaryFunction(funcName, value) =>
+        if (dialect.supportsFunction(funcName)) {
+          compileFilter(value, dialect).map(v =>
+            dialect.compileFunction(funcName, Seq(v))
+              .getOrElse(s"$funcName($v)")).orNull
+        } else {
+            null
+        }
+      case BinaryFunction(funcName, input1, input2) =>
+        if (dialect.supportsFunction(funcName)) {
+          val input = Seq(input1, input2).flatMap(compileFilter(_, dialect))
+          if (input.size == 2) {
+            input.mkString(s"$funcName(", ",", ")")
+          } else {
+            null
+          }
+        } else {
+          null
+        }
+      case BinaryOperatorFunction(funcName, input1, input2) =>
+        if (dialect.supportsFunction(funcName)) {
+          val input = Seq(input1, input2).flatMap(compileFilter(_, dialect))
+          if (input.size == 2) {
+            s" ${input(0)} $funcName ${input(1)} "
+          } else {
+            null
+          }
+        } else {
+          null
+        }
+      case TernaryFunction(funcName, input1, input2, input3) =>
+        if (dialect.supportsFunction(funcName)) {
+          val input = Seq(input1, input2, input3).flatMap(compileFilter(_, dialect))
+          if (input.size == 3) {
+            input.mkString(s"$funcName(", ",", ")")
+          } else {
+            null
+          }
+        } else {
+          null
+        }
+      case VarArgFunction(funcName, args) =>
+        if (dialect.supportsFunction(funcName)) {
+          val input = if (args.size > 1) {
+            args.map(compileFilter(_, dialect).get).mkString(", ")
+          } else {
+            args.map(compileFilter(_, dialect).get)
+          }
+          s"$funcName($input)"
+        } else {
+          null
+        }
+
       case _ => null
     })
   }

@@ -54,6 +54,15 @@ case class EqualTo(attribute: String, value: Any) extends Filter {
 }
 
 /**
+ * Compares two expression filters. Expression is very generic,
+ * This case class is to restrict expression that can be exposed to
+ * data sources.
+ */
+case class EqualToFilter(left: Filter, right: Filter) extends Filter {
+  override def references: Array[String] = left.references ++ right.references
+}
+
+/**
  * Performs equality comparison, similar to [[EqualTo]]. However, this differs from [[EqualTo]]
  * in that it returns `true` (rather than NULL) if both inputs are NULL, and `false`
  * (rather than NULL) if one of the input is NULL and the other is not NULL.
@@ -218,3 +227,47 @@ case class StringEndsWith(attribute: String, value: String) extends Filter {
 case class StringContains(attribute: String, value: String) extends Filter {
   override def references: Array[String] = Array(attribute)
 }
+
+case class LiteralFilter(value: Any) extends Filter {
+  override def references: Array[String] = Array()
+}
+
+case class Abs(attribute: String) extends Filter {
+  override def references: Array[String] = Array(attribute)
+}
+
+case class Year(attribute: String) extends Filter {
+  override def references: Array[String] = Array(attribute)
+}
+
+case class UnaryFunction(funcName: String, arg: Filter) extends Filter {
+  override def references: Array[String] = findReferences(arg)
+}
+
+case class BinaryFunction(funcName: String, left: Filter, right: Filter) extends Filter {
+  override def references: Array[String] = findReferences(left) ++ findReferences(right)
+}
+
+case class TernaryFunction(funcName: String, input1: Filter,
+                           input2: Filter, input3: Filter) extends Filter {
+  override def references: Array[String] =
+    findReferences(input1) ++ findReferences(input2) ++ findReferences(input3)
+}
+
+case class BinaryOperatorFunction(funcName: String, left: Filter, right: Filter) extends Filter {
+  override def references: Array[String] = findReferences(left) ++ findReferences(right)
+}
+
+case class VarArgFunction(funcName: String, args: Seq[Filter]) extends Filter {
+  override def references: Array[String] = Array()
+}
+
+case class AttributeFilter(attribute: String) extends Filter {
+  override def references: Array[String] = Array(attribute)
+}
+
+/*
+case class EqualToForFunctions(attribute: Function, value: Any) extends Filter {
+  override def references: Array[String] =  ++ findReferences(value)
+}
+*/
