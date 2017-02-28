@@ -404,7 +404,7 @@ class SQLListenerSuite extends SparkFunSuite with SharedSQLContext with JsonTest
     sqlContext.sparkContext.addSparkListener(listener)
     val dummyQueryExecution = new QueryExecution(spark, LocalRelation()) {
       override lazy val sparkPlan = physicalPlan
-      override lazy val executedPlan = physicalPlan
+      override val executedPlan = physicalPlan
     }
     SQLExecution.withNewExecutionId(spark, dummyQueryExecution) {
       physicalPlan.execute().collect()

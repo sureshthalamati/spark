@@ -65,17 +65,17 @@ class JDBCFunctionPushDownSuite extends QueryTest
     conn.prepareStatement("create schema test").executeUpdate()
     conn.prepareStatement(
       "create table test.orders(id INTEGER NOT NULL, itemname TEXT(32) NOT NULL, " +
-        "itemcount integer, orderdate date)").executeUpdate()
+        "itemcount integer, orderdate date, shiptime timestamp)").executeUpdate()
     conn.prepareStatement(
       "insert into test.orders values " +
-        "(1, 'iphone6', 9, DATE '2015-12-31')").executeUpdate()
+        "(1, 'iphone6', 9, DATE '2015-12-31', TIMESTAMP '2015-12-31 18:31:01')").executeUpdate()
     conn.prepareStatement(
       "insert into test.orders values " +
-        "(2, 'nexus6p', 5, DATE '2016-01-31')").executeUpdate()
+        "(2, 'nexus6p', 5, DATE '2016-01-31', TIMESTAMP '2016-01-31 09:52:02')").executeUpdate()
 
     conn.prepareStatement(
       "insert into test.orders values " +
-        "(3, 'galaxy s7', 7, DATE '2016-05-31')").executeUpdate()
+        "(3, 'galaxy s7', 7, DATE '2016-05-31', TIMESTAMP '2016-05-31 13:55:34')").executeUpdate()
     conn.commit()
 
     sql(
@@ -102,8 +102,14 @@ class JDBCFunctionPushDownSuite extends QueryTest
     df.show()
   }
 
-  test("Function used as part of expression in  predicate.") {
-    val df = sql("SELECT * FROM orders where year(ordertime) +1 = 2016")
+  /**
+    *Filter ((year(cast(SHIPTIME#4 as date)) + 1) = 2016)
+   +- *Scan JDBCRelation(TEST.ORDERS) [numPartitions=1] [ID#0,ITEMNAME#1,ITEMCOUNT#2,ORDERDATE#3,SHIPTIME#4]
+  ReadSchema: struct<ID:int,ITEMNAME:string,ITEMCOUNT:int,ORDERDATE:date,SHIPTIME:timestamp>
+    */
+  test("Function used as part of expression in  predicate, implicit cast test") {
+    // val df = sql("SELECT * FROM orders where year(shiptime) +1 = 2016")
+    val df = sql("SELECT * FROM orders where year(cast(shiptime as date)) = 2015")
     df.explain(true)
     df.show()
   }

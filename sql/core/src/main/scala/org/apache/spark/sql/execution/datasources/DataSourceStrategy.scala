@@ -543,6 +543,9 @@ object DataSourceStrategy extends Strategy with Logging {
           None
         }
 
+      case expressions.Cast(a: Attribute, dt: DataType) =>
+        Some(sources.Cast("cast", AttributeFilter(a.name), dt))
+
       case expr : Expression if (!expr.isInstanceOf[NonSQLExpression]) =>
 
         val funcName = if (expr.isInstanceOf[BinaryArithmetic]) {
