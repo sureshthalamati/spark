@@ -29,7 +29,7 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.NoSuchPartitionException
+import org.apache.spark.sql.catalyst.analysis.{NoSuchPartitionException, Resolver}
 import org.apache.spark.sql.catalyst.catalog._
 import org.apache.spark.sql.catalyst.catalog.CatalogTableType._
 import org.apache.spark.sql.catalyst.catalog.CatalogTypes.TablePartitionSpec
@@ -248,6 +248,88 @@ case class AlterTableAddColumnsCommand(
       }
     }
     catalogTable
+  }
+}
+
+/**
+ * Alter table add constraint command
+*/
+case class AlterTableAddConstraintCommand(
+    tableIdentifier: TableIdentifier,
+    tableConstraint: TableConstraint) extends RunnableCommand {
+
+  override def run(sparkSession: SparkSession): Seq[Row] = {
+    val catalog = sparkSession.sessionState.catalog
+    val table = catalog.getTableMetadata(tableIdentifier)
+    DDLUtils.verifyAlterTableType(catalog, table, isView = false)
+    val resolver = sparkSession.sessionState.conf.resolver
+    val newTableConstraints: Option[TableConstraints] = tableConstraint match {
+      case pk: PrimaryKey => addPrimaryKey(pk, table, resolver)
+      case fk: ForeignKey => addForeignKey(fk, table, catalog, resolver)
+    }
+
+    catalog.alterTable(table.copy(tableConstraints = newTableConstraints))
+    Seq.empty[Row]
+  }
+
+
+  private def addPrimaryKey(
+      pk: PrimaryKey,
+      table: CatalogTable,
+      resolver: Resolver): Option[TableConstraints] = {
+    verifyConstraint(pk.constraintName, pk.keyColumnNames, table, resolver)
+    if (table.tableConstraints.isDefined) {
+      table.tableConstraints.map(_.addPrimaryKey(pk))
+    } else {
+      Option(TableConstraints(primaryKey = Option(pk)))
+    }
+  }
+
+  private def addForeignKey(
+      fk: ForeignKey,
+      table: CatalogTable,
+      catalog: SessionCatalog,
+      resolver: Resolver): Option[TableConstraints] = {
+
+    verifyConstraint(fk.constraintName, fk.keyColumnNames, table, resolver)
+
+    // verify the reference table has a primary key on the foreign key columns.
+    val refTableIdentifier = fk.referenceTableIdentifier
+    val refTable = catalog.getTableMetadata(refTableIdentifier)
+    val refPk = refTable.tableConstraints.flatMap(_.primaryKey).getOrElse(
+      throw new AnalysisException(
+        "Primary key is not defined on the specified reference table:" + refTableIdentifier)
+    )
+    if (fk.referenceColumnNames != refPk.keyColumnNames) {
+      throw new AnalysisException(
+        "Primary key is not defined on the referenced columns:" +
+          refTableIdentifier + refPk.keyColumnNames.mkString("(", ",", ")"))
+    }
+
+    if (table.tableConstraints.isDefined) {
+      table.tableConstraints.map(_.addForeignKey(fk))
+    } else {
+      Option(TableConstraints(foreignKeys = Seq(fk)))
+    }
+  }
+
+  private def verifyConstraint(
+      constraintId: String,
+      keyColumns: Seq[String],
+      table: CatalogTable,
+      resolver: Resolver): Unit = {
+    // Verify constraint id is not duplicate
+    if (table.tableConstraints.exists(_.isDuplicateConstraintId(constraintId, resolver))) {
+      throw new AnalysisException(
+        s"Failed to add constraint, duplicate constraint id: '$constraintId'")
+    }
+
+    keyColumns.foreach { name =>
+      if (!table.schema.fields.exists(field => resolver(field.name, name))) {
+        throw new AnalysisException(
+          s"Invalid column reference '$name', table schema is '${table.schema}'")
+      }
+    }
   }
 }
 

@@ -18,15 +18,19 @@
 package org.apache.spark.sql.catalyst.catalog
 
 import java.net.URI
-import java.util.Date
+import java.util.{Date, UUID}
 
 import scala.collection.mutable
 
 import com.google.common.base.Objects
+import org.json4s._
+import org.json4s.JsonAST.JValue
+import org.json4s.JsonDSL._
+import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.{FunctionIdentifier, InternalRow, TableIdentifier}
-import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
+import org.apache.spark.sql.catalyst.analysis.{MultiInstanceRelation, Resolver}
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeMap, AttributeReference, Cast, ExprId, Literal}
 import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical._
@@ -224,7 +228,8 @@ case class CatalogTable(
     unsupportedFeatures: Seq[String] = Seq.empty,
     tracksPartitionsInCatalog: Boolean = false,
     schemaPreservesCase: Boolean = true,
-    ignoredProperties: Map[String, String] = Map.empty) {
+    ignoredProperties: Map[String, String] = Map.empty,
+    tableConstraints: Option[TableConstraints] = None) {
 
   import CatalogTable._
 
@@ -450,4 +455,165 @@ case class CatalogRelation(
   override def newInstance(): LogicalPlan = copy(
     dataCols = dataCols.map(_.newInstance()),
     partitionCols = partitionCols.map(_.newInstance()))
+}
+
+/**
+ * Common type representing table constraint.
+ */
+sealed trait TableConstraint
+
+object TableConstraint {
+  private[TableConstraint] val curId = new java.util.concurrent.atomic.AtomicLong()
+  private[TableConstraint] val jvmId = UUID.randomUUID()
+
+  /**
+   * Generated unique contsraint name to use when adding table constraints,
+   * if user does not specify the name. The `curId` field is unique within a given JVM,
+   * while the `jvmId` is used to uniquely identify JVMs.
+   */
+  def generateConstraintName(constraintType: String = "constraint"): String = {
+    s"${constraintType}_${jvmId}_${curId.getAndIncrement()}"
+  }
+
+  def parseColumn(json: JValue): String = json match {
+    case JString(name) => name
+    case _ => json.toString
+  }
+
+  object JSortedObject {
+    def unapplySeq(value: JValue): Option[List[(String, JValue)]] = value match {
+      case JObject(seq) => Some(seq.toList.sortBy(_._1))
+      case _ => None
+    }
+  }
+}
+
+/**
+ * A Primary key constraint defined on a table.
+ */
+case class PrimaryKey(
+    constraintName: String,
+    keyColumnNames: Seq[String],
+    isValidated: Boolean = false,
+    isRely: Boolean = false) extends TableConstraint {
+
+  def json: String = compact(render(jsonValue))
+
+  private def jsonValue: JValue = {
+    ("id" -> constraintName) ~
+      ("keyCols" -> keyColumnNames) ~
+      ("rely" -> isRely) ~
+      ("validate" -> isValidated)
+  }
+}
+
+object PrimaryKey {
+  import TableConstraint._
+
+  /**
+   * Converts the primary key represented in Json string to [[PrimaryKey]].
+   */
+  def fromJson(json: JValue): PrimaryKey = json match {
+    case JSortedObject(
+    ("id", JString(id)),
+    ("keyCols", JArray(keyCols)),
+    ("rely", JBool(rely)),
+    ("validate", JBool(validate))
+    ) =>
+      PrimaryKey(
+        constraintName = id,
+        keyColumnNames = keyCols.map(parseColumn),
+        isValidated = validate,
+        isRely = rely)
+  }
+}
+
+/**
+ * A Foreign key defined on a table.
+ */
+case class ForeignKey(
+    constraintName: String,
+    keyColumnNames: Seq[String],
+    referenceTableIdentifier: TableIdentifier,
+    referenceColumnNames: Seq[String] = Seq.empty,
+    isValidated: Boolean = false,
+    isRely: Boolean = false) extends TableConstraint {
+
+  def json: String = compact(render(jsonValue))
+
+  private def jsonValue: JValue = {
+    ("id" -> constraintName) ~
+      ("keyCols" -> keyColumnNames) ~
+      ("refCols" -> referenceColumnNames) ~
+      ("refDb" -> referenceTableIdentifier.database.getOrElse("")) ~
+      ("refTable" -> referenceTableIdentifier.table) ~
+      ("rely" -> isRely) ~
+      ("validate" -> isValidated)
+  }
+}
+
+object ForeignKey extends TableConstraint {
+  import TableConstraint._
+  /**
+   * Converts a foreign key represented in Json string to [[ForeignKey]].
+   */
+  def fromJson(json: JValue): ForeignKey = json match {
+    case JSortedObject(
+    ("id", JString(id)),
+    ("keyCols", JArray(keyCols)),
+    ("refCols", JArray(referenceCols)),
+    ("refDb", JString(referenceDb)),
+    ("refTable", JString(referenceTable)),
+    ("rely", JBool(rely)),
+    ("validate", JBool(validate))
+    ) =>
+      val referenceDatbase = if (referenceDb.nonEmpty) Option(referenceDb) else None
+      ForeignKey(
+        constraintName = id,
+        keyColumnNames = keyCols.map(parseColumn),
+        referenceTableIdentifier = TableIdentifier(referenceTable, referenceDatbase),
+        referenceColumnNames = referenceCols.map(parseColumn),
+        isValidated = validate,
+        isRely = rely)
+  }
+}
+
+/**
+ * A contained class to hold all the constraints defined on table.
+ */
+case class TableConstraints(
+    primaryKey: Option[PrimaryKey] = None,
+    foreignKeys: Seq[ForeignKey] = Seq.empty) {
+
+  def addPrimaryKey(pk: PrimaryKey): TableConstraints = {
+    if (primaryKey.nonEmpty) {
+      throw new AnalysisException(
+        s"Primary key '${primaryKey.get.constraintName}' already exists.")
+    } else {
+      TableConstraints(primaryKey = Option(pk), foreignKeys)
+    }
+  }
+
+  def addForeignKey(fk : ForeignKey) : TableConstraints = {
+    TableConstraints(primaryKey = primaryKey, foreignKeys :+ fk)
+  }
+
+  def isDuplicateConstraintId(constraintId: String, resolver: Resolver) : Boolean = {
+    if (!primaryKey.exists(pk => resolver(pk.constraintName, constraintId))) {
+      foreignKeys.exists(fk => resolver(fk.constraintName, constraintId))
+    } else {
+      true
+    }
+  }
+}
+
+object TableConstraints {
+  /**
+   * Converts constraints represented in Json strings to [[TableConstraints]].
+   */
+  def fromJson(pkJson: Option[String], fksJson: Seq[String]): TableConstraints = {
+    val pk = pkJson.map(pk => PrimaryKey.fromJson(parse(pk)))
+    val fks = fksJson.map(fk => ForeignKey.fromJson(parse(fk)))
+    TableConstraints(pk, fks)
+  }
 }

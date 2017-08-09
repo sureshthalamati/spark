@@ -1997,4 +1997,250 @@ class HiveDDLSuite
       sq.stop()
     }
   }
+
+  // New alter add tests , these tests should get moved to DDlSuite,
+  // Keeping it here for debugging for now. Unable to run individual tests
+  // because DDLSuite is abstract class.
+
+  private def checkPrimaryKey(
+      expectedPk: PrimaryKey,
+      tableName: String,
+      db: Option[String] = None) = {
+    val table = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName, db))
+    assert(table.tableConstraints.flatMap(_.primaryKey) == Some(expectedPk))
+  }
+
+  private def checkForeignKeys(
+      expectedFks: Seq[ForeignKey],
+      tableName: String,
+      db: Option[String] = None) = {
+    val table = spark.sessionState.catalog.getTableMetadata(TableIdentifier(tableName, db))
+    val actualFks = table.tableConstraints.map(_.foreignKeys).get
+    assert(actualFks.size == expectedFks.size)
+    assert(expectedFks.forall(actualFks.contains(_)))
+  }
+
+  test("alter table add primary key") {
+    withTable("t1") {
+      sql("CREATE TABLE t1(c1 int, c2 int, c3 string) using parquet")
+      sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (c1) novalidate rely")
+      val table = spark.sessionState.catalog.getTableMetadata(TableIdentifier("t1"))
+      checkPrimaryKey(PrimaryKey("pk1", Seq("c1"), false, true), "t1")
+    }
+    // composite primary key
+    withTable("t1") {
+      sql("CREATE TABLE t1(c1 int, c2 int, c3 string) using parquet")
+      sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (c1, c3) novalidate norely")
+      checkPrimaryKey(PrimaryKey("pk1", Seq("c1", "c3"), false, false), "t1")
+    }
+  }
+
+  test("alter table add foreign key") {
+    withTable("parent1", "parent2", "child1", "child2") {
+      sql("CREATE TABLE parent1(c1 int, c2 int, c3 string) using parquet")
+      sql("ALTER TABLE parent1 ADD CONSTRAINT pk1 primary key (c1) novalidate rely")
+      sql("CREATE TABLE child1(c1 int, c2 int, c3 string) using parquet")
+      sql("ALTER TABLE child1 ADD CONSTRAINT fk1 foreign key (c1)" +
+        " references parent1(c1) novalidate rely")
+
+      checkPrimaryKey(PrimaryKey("pk1", Seq("c1"), false, true), "parent1")
+      checkForeignKeys(
+        Seq(
+          ForeignKey("fk1",
+          Seq("c1"),
+          TableIdentifier("parent1"),
+          Seq("c1"),
+          false,
+          true)),
+        "child1")
+
+      // composite foreign key, and more than one foreign key.
+      sql("CREATE TABLE parent2(c1 int, c2 int, c3 string) using parquet")
+      sql("ALTER TABLE parent2 ADD CONSTRAINT pk1 primary key (c1, c3) novalidate norely")
+      sql("ALTER TABLE child1 ADD CONSTRAINT fk2 foreign key (c1, c3)" +
+        " references parent2(c1, c3) novalidate norely")
+
+      checkPrimaryKey(PrimaryKey("pk1", Seq("c1", "c3"), false, false), "parent2")
+      checkForeignKeys(
+        Seq(
+          ForeignKey(
+            "fk1",
+            Seq("c1"),
+            TableIdentifier("parent1"),
+            Seq("c1"),
+            false,
+            true),
+          ForeignKey(
+            "fk2",
+            Seq("c1", "c3"),
+            TableIdentifier("parent2"),
+            Seq("c1", "c3"),
+            false,
+            false)),
+        "child1")
+    }
+  }
+
+  test("alter table add constraint with generated constraint names") {
+    withTable("t1", "t2") {
+      sql("CREATE TABLE t1(c1 int, c2 int, c3 string) using parquet")
+      // generate name for primary key
+      sql("ALTER TABLE t1 ADD primary key (c1)")
+      val pk = spark.sessionState.catalog
+        .getTableMetadata(TableIdentifier("t1")).tableConstraints.flatMap(_.primaryKey).get
+      assert(pk.constraintName.matches("""pk_.*_\d+"""))
+      assert(pk.keyColumnNames == Seq("c1"))
+      // generate name for foreign key
+      sql("CREATE TABLE t2(x int, y int, z string) using parquet")
+      sql("ALTER TABLE t2 ADD foreign key (y) references t1(c1)")
+
+      val fk = spark.sessionState.catalog
+        .getTableMetadata(TableIdentifier("t2")).tableConstraints.map(_.foreignKeys).get.head
+      assert(fk.constraintName.matches("""fk_.*_\d+"""))
+      assert(fk.keyColumnNames == Seq("y"))
+    }
+  }
+
+  test("alter table add constraint with database name") {
+    val db1 = "mydb1"
+    // non default database
+    withDatabase(s"$db1") {
+      sql(s"CREATE DATABASE $db1")
+      sql(s"USE $db1")
+      withTable("t1", "t2") {
+        sql("CREATE TABLE t1 (c1 int, c2 int, c3 string) using parquet")
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk1 PRIMARY KEY (c1)")
+        sql("CREATE TABLE t2(x int, y int, z string) using parquet")
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 FOREIGN KEY (y) references t1(c1)")
+
+        checkPrimaryKey(PrimaryKey("pk1", Seq("c1"), false, false), "t1", Option(s"$db1"))
+
+        checkForeignKeys(
+          Seq(
+            ForeignKey("fk1",
+              Seq("y"),
+              TableIdentifier("t1"),
+              Seq("c1"),
+              false,
+              false)),
+          "t2", Option(s"$db1"))
+      }
+    }
+
+    // creating constraints for the tables in different databases
+    val db2 = "mydb2"
+    withDatabase(s"$db1", s"$db2") {
+      withTable(s"${db1}.t1", s"${db2}.t2") {
+        sql(s"CREATE DATABASE $db1")
+        sql(s"CREATE DATABASE $db2")
+
+        sql(s"CREATE TABLE ${db1}.t1(c1 int, c2 int, c3 string) using parquet")
+        sql(s"ALTER TABLE ${db1}.t1 ADD CONSTRAINT pk1 PRIMARY KEY (c1)")
+
+        sql(s"CREATE TABLE ${db2}.t2(x int, y int, z string) using parquet")
+        sql(s"ALTER TABLE ${db2}.t2 ADD CONSTRAINT fk1 FOREIGN KEY (y) references ${db1}.t1(c1)")
+
+        checkPrimaryKey(PrimaryKey("pk1", Seq("c1"), false, false), "t1", Option(s"$db1"))
+
+        checkForeignKeys(
+          Seq(
+            ForeignKey("fk1",
+              Seq("y"),
+              TableIdentifier("t1", Option(s"$db1")),
+              Seq("c1"),
+              false,
+              false)),
+          "t2", Option(s"$db2"))
+      }
+    }
+  }
+
+
+  test("invalid add primary key") {
+    withTable("t1") {
+      sql("CREATE TABLE t1(col1 int, col2 int, col3 string)")
+      sql("INSERT INTO t1 VALUES (1, 2, 'abcd')")
+
+      // invalid table name
+      val e = intercept[AnalysisException] {
+        sql("ALTER TABLE xct1 ADD CONSTRAINT pk1 primary key (col1, col2)")
+      }.getMessage
+      assert(e.contains("Table or view 'xct1' not found in database"))
+      // invalid column names
+      val e1 = intercept[AnalysisException] {
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (xcol1, col2)")
+      }.getMessage
+      assert(e1.contains("Invalid column reference 'xcol1'"))
+
+      // more than one primary key not allowed.
+      val e2 = intercept[AnalysisException] {
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (col1, col2)")
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk2 primary key (col1, col2)")
+      }.getMessage
+      assert(e2.contains("Primary key 'pk1' already exists."))
+
+      // duplicate constraint name
+      val e4 = intercept[AnalysisException] {
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (col3)")
+      }.getMessage
+      assert(e4.contains("duplicate constraint id: 'pk1'"))
+    }
+  }
+
+  test("invalid alter table add foreign keys.") {
+    withTable("t1", "t2") {
+      sql("CREATE TABLE t2(c1 int, c2 int, c3 string)")
+      // reference table does not exist
+      val e = intercept[AnalysisException] {
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col1, col3)")
+      }.getMessage
+      assert(e.contains("Table or view 't1' not found in database"))
+
+      sql("CREATE TABLE t1(col1 int, col2 int, col3 string)")
+
+      // invalid column name
+      val e1 = intercept[AnalysisException] {
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (xyz, c3) REFERENCES t1 (col1, col3)")
+      }.getMessage
+      assert(e1.contains("Invalid column reference 'xyz'"))
+
+      // primary key does not exists, no constraints on the table
+      val e2 = intercept[AnalysisException] {
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col1, col3)")
+      }.getMessage
+      assert(e2.contains("Primary key is not defined on the specified reference table:`t1`"))
+
+      // primary key does not exist, but it has foreign key
+      val e21 = intercept[AnalysisException] {
+        sql("CREATE TABLE t3(c1 int)")
+        sql("alter table t3 add primary key(c1)")
+        sql("alter table t1 add foreign key(col1) references t3(c1)")
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col1, col3)")
+      }.getMessage
+      assert(e21.contains("Primary key is not defined on the specified reference table:`t1`"))
+
+      // primary key columns does not match
+      val e3 = intercept[AnalysisException] {
+        sql("ALTER TABLE t1 ADD CONSTRAINT pk1 primary key (col2, col3)")
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col1, col3)")
+      }.getMessage
+      assert(e3.contains("Primary key is not defined on the referenced columns"))
+
+      // duplicate constraint name
+      val e4 = intercept[AnalysisException] {
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col2, col3)")
+        sql("ALTER TABLE t2 ADD CONSTRAINT fk1 " +
+          "FOREIGN key (c1, c3) REFERENCES t1 (col2, col3)")
+      }.getMessage
+      assert(e4.contains("duplicate constraint id: 'fk1'"))
+    }
+  }
+
+
 }

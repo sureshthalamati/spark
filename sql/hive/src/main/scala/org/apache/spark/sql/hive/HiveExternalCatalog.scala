@@ -429,6 +429,27 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
     properties
   }
 
+  /**
+   * Converts table constraints into table properties so that we can
+   * persist them through hive client.
+   */
+  private def tableConstraintsToTableProps(table: CatalogTable): mutable.Map[String, String] = {
+    val constraintProperties = new mutable.HashMap[String, String]
+    table.tableConstraints.foreach { tableConstraints =>
+      tableConstraints.primaryKey foreach { pk =>
+        constraintProperties += (s"$TABLE_CONSTRAINT_PRIMARY_KEY" -> pk.json)
+      }
+      val fks = tableConstraints.foreignKeys
+      if (fks.nonEmpty) {
+        constraintProperties += TABLE_NUM_FK_CONSTRAINTS -> fks.size.toString()
+        fks.zipWithIndex.foreach { case (fk, index) =>
+          constraintProperties += (s"$TABLE_CONSTRAINT_FOREIGNKEY_PREFIX$index" -> fk.json)
+        }
+      }
+    }
+    constraintProperties
+  }
+
   private def defaultTablePath(tableIdent: TableIdentifier): String = {
     val dbLocation = getDatabase(tableIdent.database.get).locationUri
     new Path(new Path(dbLocation), tableIdent.table).toString
@@ -596,7 +617,12 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
       val propsFromOldTable = oldTableDef.properties.filter { case (k, v) =>
         k.startsWith(DATASOURCE_PREFIX) || k.startsWith(STATISTICS_PREFIX)
       }
-      val newTableProps = propsFromOldTable ++ tableDefinition.properties + partitionProviderProp
+
+      // convert table constraints to properties so that we can persist them through hive api
+      val constraintProperties = tableConstraintsToTableProps(tableDefinition)
+
+      val newTableProps = propsFromOldTable ++ tableDefinition.properties +
+        partitionProviderProp ++ constraintProperties
       val newDef = tableDefinition.copy(
         storage = newStorage,
         schema = oldTableDef.schema,
@@ -726,6 +752,12 @@ private[spark] class HiveExternalCatalog(conf: SparkConf, hadoopConf: Configurat
           sizeInBytes = BigInt(table.properties(STATISTICS_TOTAL_SIZE)),
           rowCount = table.properties.get(STATISTICS_NUM_ROWS).map(BigInt(_)),
           colStats = colStats.toMap)))
+    }
+
+    // construct table constraints from the constraint table properties in the Hive metastore
+    val tableConstraints = getConstraintsFromTableProperties(table)
+    if (tableConstraints.isDefined) {
+      table = table.copy(tableConstraints = tableConstraints)
     }
 
     // Get the original table properties as defined by the user.
@@ -1203,6 +1235,11 @@ object HiveExternalCatalog {
   val TABLE_PARTITION_PROVIDER_CATALOG = "catalog"
   val TABLE_PARTITION_PROVIDER_FILESYSTEM = "filesystem"
 
+  val TABLE_CONSTRAINT_PREFIX = SPARK_SQL_PREFIX + "constraint."
+  val TABLE_CONSTRAINT_PRIMARY_KEY = SPARK_SQL_PREFIX + TABLE_CONSTRAINT_PREFIX + "pk"
+  val TABLE_NUM_FK_CONSTRAINTS = SPARK_SQL_PREFIX + "numFkConstraints"
+  val TABLE_CONSTRAINT_FOREIGNKEY_PREFIX = SPARK_SQL_PREFIX + TABLE_CONSTRAINT_PREFIX + "fk."
+
   /**
    * Returns the fully qualified name used in table properties for a particular column stat.
    * For example, for column "mycol", and "min" stat, this should return
@@ -1271,6 +1308,33 @@ object HiveExternalCatalog {
         numBuckets.toInt,
         getColumnNamesByType(metadata.properties, "bucket", "bucketing columns"),
         getColumnNamesByType(metadata.properties, "sort", "sorting columns"))
+    }
+  }
+
+  /**
+   * Constructs table constraints from the contraint table properties in Hive metastore.
+   */
+  private def getConstraintsFromTableProperties(table: CatalogTable): Option[TableConstraints] = {
+    val primaryKeyJson = table.properties.get(TABLE_CONSTRAINT_PRIMARY_KEY)
+    val numFkConstraints = table.properties.get(TABLE_NUM_FK_CONSTRAINTS)
+    val foreignKeysJson: Seq[String] = if (numFkConstraints.isDefined) {
+      (0 until numFkConstraints.get.toInt).flatMap { index =>
+        val key = s"$TABLE_CONSTRAINT_FOREIGNKEY_PREFIX$index"
+        val fkJson = table.properties.get(key).orElse {
+          throw new AnalysisException(
+            s"Could not read foreign key from the hive metastore because it is corrupted." +
+              s"Missing foreign key $key, ${numFkConstraints.get} foreign keys are expected).")
+        }
+        fkJson
+      }
+    } else {
+      Seq.empty[String]
+    }
+
+    if (primaryKeyJson.isDefined || foreignKeysJson.nonEmpty) {
+      Option(TableConstraints.fromJson(primaryKeyJson, foreignKeysJson))
+    } else {
+      None
     }
   }
 }

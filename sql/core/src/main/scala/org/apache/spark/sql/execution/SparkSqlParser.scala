@@ -1415,6 +1415,51 @@ class SparkSqlAstBuilder(conf: SQLConf) extends AstBuilder(conf) {
   }
 
   /**
+   * Alter table to add a constraint. This creates a [[AlterTableAddConstraintCommand]] command.
+   *
+   * For example:
+   * {{{
+   *   ALTER TABLE table ADD CONSTRAINT pk1 PRIMARY KEY (col1) VALIDATE RELY
+   * }}}
+   */
+  override def visitAddTableConstraint(
+      ctx: AddTableConstraintContext): LogicalPlan = withOrigin(ctx) {
+    val tableIdentifier = visitTableIdentifier(ctx.tableIdentifier)
+    AlterTableAddConstraintCommand(
+      tableIdentifier = visitTableIdentifier(ctx.tableIdentifier),
+      tableConstraint = visitTableConstraint(ctx.tableConstraint))
+  }
+
+  /**
+   * Creates primary or foreign key constraint.
+   */
+  override def visitTableConstraint(
+      ctx: TableConstraintContext): TableConstraint = withOrigin(ctx) {
+    val keyColNames = visitIdentifierList(ctx.keyColNames).toArray
+    val constraintName = Option(ctx.identifier()).map(_.getText)
+    val isValidated = Option(ctx.constraintState).map(_.VALIDATE != null).getOrElse(false)
+    val isRely = Option(ctx.constraintState).map(_.RELY != null).getOrElse(false)
+
+    if (ctx.PRIMARY != null) {
+      PrimaryKey(
+        constraintName = constraintName.getOrElse(TableConstraint.generateConstraintName("pk")),
+        keyColumnNames = keyColNames,
+        isValidated = isValidated,
+        isRely = isRely)
+    } else {
+      // Foreign key
+      val referenceColNames = visitIdentifierList(ctx.referenceClause.referenceColNames).toArray
+      ForeignKey(
+        constraintName = constraintName.getOrElse(TableConstraint.generateConstraintName("fk")),
+        keyColumnNames = keyColNames,
+        referenceTableIdentifier = visitTableIdentifier(ctx.referenceClause.tableIdentifier),
+        referenceColumnNames = referenceColNames,
+        isValidated = isValidated,
+        isRely = isRely)
+    }
+  }
+
+  /**
    * Create a [[ScriptInputOutputSchema]].
    */
   override protected def withScriptIOSchema(
