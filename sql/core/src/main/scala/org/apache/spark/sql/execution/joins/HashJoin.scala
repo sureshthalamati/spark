@@ -24,6 +24,7 @@ import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
 import org.apache.spark.sql.execution.{RowIterator, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetric
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{IntegralType, LongType}
 
 trait HashJoin {
@@ -195,7 +196,10 @@ trait HashJoin {
       streamedIter: Iterator[InternalRow],
       hashed: HashedRelation,
       numOutputRows: SQLMetric,
-      avgHashProbe: SQLMetric): Iterator[InternalRow] = {
+      avgHashProbe: SQLMetric,
+      numTasks: SQLMetric,
+      stageId: SQLMetric,
+      logTaskInfo : Boolean): Iterator[InternalRow] = {
 
     val joinedIter = joinType match {
       case _: InnerLike =>
@@ -211,6 +215,21 @@ trait HashJoin {
       case x =>
         throw new IllegalArgumentException(
           s"BroadcastHashJoin should not take $x as the JoinType")
+    }
+
+    if (logTaskInfo) {
+      val taskContext = TaskContext.get()
+      logWarning(
+        s"""
+       | Partition Id : ${taskContext.partitionId()}
+       | Task attempt id : ${taskContext.taskAttemptId()}
+       | Attempt Number : ${taskContext.attemptNumber()}
+       | Stage Id: ${taskContext.stageId()}
+       """.stripMargin.replaceAll("\n", ""))
+
+      // add to number of tasks involved in this join
+      numTasks += 1
+      stageId.set(taskContext.stageId())
     }
 
     // At the end of the task, we update the avg hash probe.

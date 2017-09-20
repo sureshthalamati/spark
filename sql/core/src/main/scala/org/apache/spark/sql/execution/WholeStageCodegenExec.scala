@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution
 
 import java.util.Locale
 
-import org.apache.spark.broadcast
+import org.apache.spark.{broadcast, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
@@ -393,10 +393,18 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
 
     val rdds = child.asInstanceOf[CodegenSupport].inputRDDs()
     assert(rdds.size <= 2, "Up to two input RDDs can be supported")
+    val logTaskInfoEnabled = SQLConf.get.logBhjNumTasks
+    if (logTaskInfoEnabled) {
+      logWarning("WholestageCodegen Plan:" + child)
+      logWarning("Wholstage Codegen RDD Number of partitions:" + rdds.head.partitions.size)
+    }
     if (rdds.length == 1) {
       rdds.head.mapPartitionsWithIndex { (index, iter) =>
         val clazz = CodeGenerator.compile(cleanedSource)
         val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
+        if(logTaskInfoEnabled) {
+          logTaskInfo(index)
+        }
         buffer.init(index, Array(iter))
         new Iterator[InternalRow] {
           override def hasNext: Boolean = {
@@ -416,6 +424,9 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
         val (leftIter, rightIter) = zippedIter.next()
         val clazz = CodeGenerator.compile(cleanedSource)
         val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
+        if (logTaskInfoEnabled) {
+          logTaskInfo(index)
+        }
         buffer.init(index, Array(leftIter, rightIter))
         new Iterator[InternalRow] {
           override def hasNext: Boolean = {
@@ -427,6 +438,18 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
         }
       }
     }
+  }
+
+  private def logTaskInfo(paritionIndex: Int): Unit = {
+    logWarning("Whole stage codegen processing , partition index:" + paritionIndex)
+    val taskContext = TaskContext.get()
+    logWarning(
+      s"""Whole statge codegen:
+        | Partition Id : ${taskContext.partitionId()}
+        | Task attempt id : ${taskContext.taskAttemptId()}
+        | Attempt Number : ${taskContext.attemptNumber()}
+        | Stage Id: ${taskContext.stageId()}
+        """.stripMargin.replaceAll("\n", ""))
   }
 
   override def inputRDDs(): Seq[RDD[InternalRow]] = {

@@ -1075,4 +1075,37 @@ class JDBCSuite extends SparkFunSuite
       val df3 = sql("SELECT * FROM test_sessionInitStatement")
       assert(df3.collect() === Array(Row(21519, 1234)))
     }
+
+
+  private def testJdbcBroadCastJoinNumTasks(partitioned : Boolean = false) = {
+    sql("set spark.sql.execution.bhj.logNumTasks=true")
+    val df1 = spark.createDataFrame(Seq((1, "4"), (2, "2"))).toDF("key", "value")
+    df1.write.saveAsTable("t1")
+    if (partitioned) {
+      sql("select parts.theid , parts.name from t1, parts where parts.theid = t1.key").collect()
+    } else {
+      sql("select foobar.theid , foobar.name from t1, foobar where foobar.theid = t1.key").collect()
+    }
+  }
+
+  test("Broadcast join number of tasks with codegen single partition") {
+    sql("set spark.sql.codegen.wholeStage=true")
+    testJdbcBroadCastJoinNumTasks()
+  }
+
+  test("Broadcast join number of tasks with codegen multiple partition") {
+    sql("set spark.sql.codegen.wholeStage=true")
+    testJdbcBroadCastJoinNumTasks(true)
+  }
+
+  test("Broadcast join number of tasks without codegen single partition") {
+    sql("set spark.sql.codegen.wholeStage=false")
+    testJdbcBroadCastJoinNumTasks()
+  }
+
+  test("Broadcast join number of tasks without codegen multiple partition") {
+    sql("set spark.sql.codegen.wholeStage=false")
+    testJdbcBroadCastJoinNumTasks(true)
+  }
+
 }

@@ -19,6 +19,7 @@ package org.apache.spark.sql.execution.joins
 
 import org.apache.spark.TaskContext
 import org.apache.spark.broadcast.Broadcast
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
@@ -27,6 +28,7 @@ import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.{BinaryExecNode, CodegenSupport, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.util.TaskCompletionListener
 
@@ -48,7 +50,10 @@ case class BroadcastHashJoinExec(
 
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"))
+    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"),
+    "numTasks" -> SQLMetrics.createMetric(sparkContext, "num tasks"),
+    "stageId" -> SQLMetrics.createSizeMetric(sparkContext, "stage Id")
+  )
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -63,12 +68,18 @@ case class BroadcastHashJoinExec(
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
     val avgHashProbe = longMetric("avgHashProbe")
-
+    val numTasks = longMetric("numTasks")
+    val stageId = longMetric("stageId")
+    val logTaskInfo = SQLConf.get.logBhjNumTasks
     val broadcastRelation = buildPlan.executeBroadcast[HashedRelation]()
-    streamedPlan.execute().mapPartitions { streamedIter =>
+    val streamedPlanRdd = streamedPlan.execute()
+    if (logTaskInfo) {
+      logWarning("Wholstage Codegen RDD Number of partitions:" + streamedPlanRdd.partitions.size)
+    }
+    streamedPlanRdd.mapPartitions { streamedIter =>
       val hashed = broadcastRelation.value.asReadOnlyCopy()
       TaskContext.get().taskMetrics().incPeakExecutionMemory(hashed.estimatedSize)
-      join(streamedIter, hashed, numOutputRows, avgHashProbe)
+      join(streamedIter, hashed, numOutputRows, avgHashProbe, numTasks, stageId, logTaskInfo)
     }
   }
 
@@ -97,14 +108,18 @@ case class BroadcastHashJoinExec(
    * Returns the codes used to add a task completion listener to update avg hash probe
    * at the end of the task.
    */
-  private def genTaskListener(avgHashProbe: String, relationTerm: String): String = {
+  private def genTaskListener(avgHashProbe: String, relationTerm: String,
+    numTasks: String, stageId: String): String = {
     val listenerClass = classOf[TaskCompletionListener].getName
     val taskContextClass = classOf[TaskContext].getName
+
     s"""
        | $taskContextClass$$.MODULE$$.get().addTaskCompletionListener(new $listenerClass() {
        |   @Override
        |   public void onTaskCompletion($taskContextClass context) {
        |     $avgHashProbe.set($relationTerm.getAverageProbesPerLookup());
+       |     $numTasks.add(1);
+       |     $stageId.set(context.stageId());
        |   }
        | });
      """.stripMargin
@@ -122,7 +137,9 @@ case class BroadcastHashJoinExec(
 
     // At the end of the task, we update the avg hash probe.
     val avgHashProbe = metricTerm(ctx, "avgHashProbe")
-    val addTaskListener = genTaskListener(avgHashProbe, relationTerm)
+    val numTasks = metricTerm(ctx, "numTasks")
+    val stageId = metricTerm(ctx, "stageId")
+    val addTaskListener = genTaskListener(avgHashProbe, relationTerm, numTasks, stageId)
 
     ctx.addMutableState(clsName, relationTerm,
       s"""
@@ -224,6 +241,7 @@ case class BroadcastHashJoinExec(
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val (matched, checkCondition, buildVars) = getJoinCondition(ctx, input)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    // val numTasks = metricTerm(ctx, "numTasks")
 
     val resultVars = buildSide match {
       case BuildLeft => buildVars ++ input

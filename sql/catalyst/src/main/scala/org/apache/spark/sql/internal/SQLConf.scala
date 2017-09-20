@@ -925,6 +925,11 @@ object SQLConf {
       .intConf
       .createWithDefault(10000)
 
+  val LOG_BHJ_NUM_TASKS = buildConf("spark.sql.execution.bhj.logNumTasks")
+    .doc("When true, task information is logged for broad cast hash join ")
+    .booleanConf
+    .createWithDefault(false)
+
   object Deprecated {
     val MAPRED_REDUCE_TASKS = "mapred.reduce.tasks"
   }
@@ -1202,6 +1207,8 @@ class SQLConf extends Serializable with Logging {
   def arrowEnable: Boolean = getConf(ARROW_EXECUTION_ENABLE)
 
   def arrowMaxRecordsPerBatch: Int = getConf(ARROW_EXECUTION_MAX_RECORDS_PER_BATCH)
+
+  def logBhjNumTasks: Boolean = getConf(LOG_BHJ_NUM_TASKS)
 
   /** ********************** SQLConf functionality methods ************ */
 

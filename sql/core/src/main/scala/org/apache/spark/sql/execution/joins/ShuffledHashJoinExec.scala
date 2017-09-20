@@ -25,6 +25,7 @@ import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.{BinaryExecNode, SparkPlan}
 import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.internal.SQLConf
 
 /**
  * Performs a hash join of two child relations by first shuffling the data using the join keys.
@@ -43,7 +44,10 @@ case class ShuffledHashJoinExec(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "buildDataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size of build side"),
     "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"),
-    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"))
+    "avgHashProbe" -> SQLMetrics.createAverageMetric(sparkContext, "avg hash probe"),
+    "numTasks" -> SQLMetrics.createMetric(sparkContext, "num tasks"),
+    "stageId" -> SQLMetrics.createSizeMetric(sparkContext, "stage Id")
+  )
 
   override def requiredChildDistribution: Seq[Distribution] =
     ClusteredDistribution(leftKeys) :: ClusteredDistribution(rightKeys) :: Nil
@@ -64,9 +68,12 @@ case class ShuffledHashJoinExec(
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
     val avgHashProbe = longMetric("avgHashProbe")
+    val numTasks = longMetric("numTasks")
+    val stageId = longMetric("stageId")
+    val logTaskInfo = SQLConf.get.logBhjNumTasks
     streamedPlan.execute().zipPartitions(buildPlan.execute()) { (streamIter, buildIter) =>
       val hashed = buildHashedRelation(buildIter)
-      join(streamIter, hashed, numOutputRows, avgHashProbe)
+      join(streamIter, hashed, numOutputRows, avgHashProbe, numTasks, stageId, logTaskInfo)
     }
   }
 }
